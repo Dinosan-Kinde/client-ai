@@ -21,14 +21,12 @@ function parseConversation(encoded) {
   return messages;
 }
 
-// Get response from Claude API
+// Get response from Gemini API
 function getClaudeResponse(messages) {
   var apiKey = localStorage.getItem('api_key');
-  var baseUrl = localStorage.getItem('base_url') || 'https://api.anthropic.com/v1/messages';
-  var model = localStorage.getItem('model') || 'claude-haiku-4-5';
+  var baseUrl = localStorage.getItem('base_url') || 'https://generativelanguage.googleapis.com/v1beta/models/';
+  var model = localStorage.getItem('model') || 'gemini-2.5-flash-lite:generateContent';
   var systemMessage = localStorage.getItem('system_message') || "You're running on a Pebble smartwatch. Please respond in plain text without any formatting, keeping your responses within 1-3 sentences.";
-  var webSearchEnabled = localStorage.getItem('web_search_enabled') === 'true';
-  var mcpServersJson = localStorage.getItem('mcp_servers');
 
   if (!apiKey) {
     console.log('No API key configured');
@@ -38,19 +36,12 @@ function getClaudeResponse(messages) {
     return;
   }
 
-  console.log('Sending request to Claude API with ' + messages.length + ' messages');
+  console.log('Sending request to Gemini API with ' + messages.length + ' messages');
 
   var xhr = new XMLHttpRequest();
-  xhr.open('POST', baseUrl, true);
+  var url = baseUrl + model + '?key=' + apiKey;
+  xhr.open('POST', url, true);
   xhr.setRequestHeader('Content-Type', 'application/json');
-  xhr.setRequestHeader('x-api-key', apiKey);
-  xhr.setRequestHeader('anthropic-version', '2023-06-01');
-
-  // Add MCP beta header if MCP servers are configured
-  if (mcpServersJson && mcpServersJson.trim().length > 0) {
-    xhr.setRequestHeader('anthropic-beta', 'mcp-client-2025-04-04');
-    console.log('MCP beta header added');
-  }
 
   xhr.timeout = 15000;
 
@@ -59,33 +50,22 @@ function getClaudeResponse(messages) {
       try {
         var data = JSON.parse(xhr.responseText);
 
-        // Extract all text blocks from content array
-        if (data.content && data.content.length > 0) {
+        // Extract text from Gemini response format
+        if (data.candidates && data.candidates.length > 0 && 
+            data.candidates[0].content && 
+            data.candidates[0].content.parts && 
+            data.candidates[0].content.parts.length > 0) {
+          
           var responseText = '';
-          var mcpToolsUsed = 0;
-
-          for (var i = 0; i < data.content.length; i++) {
-            var block = data.content[i];
-            if (block.type === 'text' && block.text) {
-              responseText += block.text;
-            } else if (block.type === 'mcp_tool_use') {
-              // MCP tool is being called - log for debugging
-              mcpToolsUsed++;
-              console.log('MCP tool called: ' + block.name + ' on server ' + block.server_name);
-            } else if (block.type === 'mcp_tool_result') {
-              // MCP tool result received - log for debugging
-              console.log('MCP tool result received for tool_use_id: ' + block.tool_use_id);
-              responseText += '\n\n';
-            } else if (block.type === 'server_tool_use') {
-              responseText += '\n\n';
+          var parts = data.candidates[0].content.parts;
+          
+          for (var i = 0; i < parts.length; i++) {
+            if (parts[i].text) {
+              responseText += parts[i].text;
             }
           }
 
-          console.log(JSON.stringify(data.content, null, 2));
-
-          if (mcpToolsUsed > 0) {
-            console.log('Response used ' + mcpToolsUsed + ' MCP tool(s)');
-          }
+          console.log(JSON.stringify(data.candidates[0].content, null, 2));
 
           responseText = responseText.trim();
 
@@ -93,12 +73,12 @@ function getClaudeResponse(messages) {
             console.log('Sending response: ' + responseText);
             Pebble.sendAppMessage({ 'RESPONSE_TEXT': responseText });
           } else {
-            console.log('No text blocks in response');
-            Pebble.sendAppMessage({ 'RESPONSE_TEXT': 'No response from Claude' });
+            console.log('No text in response');
+            Pebble.sendAppMessage({ 'RESPONSE_TEXT': 'No response from Gemini' });
           }
         } else {
           console.log('No content in response');
-          Pebble.sendAppMessage({ 'RESPONSE_TEXT': 'No response from Claude' });
+          Pebble.sendAppMessage({ 'RESPONSE_TEXT': 'No response from Gemini' });
         }
       } catch (e) {
         console.log('Error parsing response: ' + e);
@@ -134,42 +114,37 @@ function getClaudeResponse(messages) {
 
   xhr.ontimeout = function () {
     console.log('Request timeout');
-    Pebble.sendAppMessage({ 'RESPONSE_TEXT': 'Request timed out. Likely problems on Anthropic\'s side.' });
+    Pebble.sendAppMessage({ 'RESPONSE_TEXT': 'Request timed out. Likely problems on Google\'s side.' });
     Pebble.sendAppMessage({ 'RESPONSE_END': 1 });
   };
 
+  // Convert messages to Gemini format
+  var geminiContents = [];
+  
+  for (var i = 0; i < messages.length; i++) {
+    var message = messages[i];
+    geminiContents.push({
+      role: message.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: message.content }]
+    });
+  }
+
   var requestBody = {
-    model: model,
-    max_tokens: 256,
-    messages: messages
+    contents: geminiContents
   };
 
-  // Add system message if provided
+  // Add system instruction if provided
   if (systemMessage) {
-    requestBody.system = systemMessage;
+    requestBody.systemInstruction = {
+      parts: [{ text: systemMessage }]
+    };
   }
 
-  // Add web search tool if enabled
-  if (webSearchEnabled) {
-    requestBody.tools = [{
-      type: 'web_search_20250305',
-      name: 'web_search',
-      max_uses: 5
-    }];
-  }
-
-  // Add MCP servers if configured
-  if (mcpServersJson && mcpServersJson.trim().length > 0) {
-    try {
-      var mcpServers = JSON.parse(mcpServersJson);
-      if (Array.isArray(mcpServers) && mcpServers.length > 0) {
-        requestBody.mcp_servers = mcpServers;
-        console.log('Added ' + mcpServers.length + ' MCP server(s) to request');
-      }
-    } catch (e) {
-      console.log('Error parsing MCP servers JSON: ' + e);
-    }
-  }
+  // Add generation config for better control
+  requestBody.generationConfig = {
+    maxOutputTokens: 256,
+    temperature: 1.0
+  };
 
   console.log('Request body: ' + JSON.stringify(requestBody));
   xhr.send(JSON.stringify(requestBody));
@@ -212,17 +187,13 @@ Pebble.addEventListener('showConfiguration', function () {
   var baseUrl = localStorage.getItem('base_url') || '';
   var model = localStorage.getItem('model') || '';
   var systemMessage = localStorage.getItem('system_message') || '';
-  var webSearchEnabled = localStorage.getItem('web_search_enabled') || 'false';
-  var mcpServers = localStorage.getItem('mcp_servers') || '';
 
   // Build configuration URL
-  var url = 'https://breitburg.github.io/claude-for-pebble/config/';
+  var url = "https://dinosan-kinde.github.io/client-ai/claude-for-pebble/config/";
   url += '?api_key=' + encodeURIComponent(apiKey);
   url += '&base_url=' + encodeURIComponent(baseUrl);
   url += '&model=' + encodeURIComponent(model);
   url += '&system_message=' + encodeURIComponent(systemMessage);
-  url += '&web_search_enabled=' + encodeURIComponent(webSearchEnabled);
-  url += '&mcp_servers=' + encodeURIComponent(mcpServers);
 
   console.log('Opening configuration page: ' + url);
   Pebble.openURL(url);
@@ -235,7 +206,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     console.log('Settings received: ' + JSON.stringify(settings));
 
     // Save or clear settings in local storage
-    var keys = ['api_key', 'base_url', 'model', 'system_message', 'web_search_enabled', 'mcp_servers'];
+    var keys = ['api_key', 'base_url', 'model', 'system_message'];
     keys.forEach(function (key) {
       if (settings[key] && settings[key].trim() !== '') {
         localStorage.setItem(key, settings[key]);
